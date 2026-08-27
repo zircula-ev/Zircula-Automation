@@ -96,10 +96,11 @@ def main():
 
         mail_ids = messages[0].split()
         print(f"{len(mail_ids)} ungelesene Mails gefunden")
+        failures = []
 
         for mail_id in mail_ids:
             try:
-                status, message_data = mailbox.fetch(mail_id, "(RFC822)")
+                status, message_data = mailbox.fetch(mail_id, "(BODY.PEEK[])")
                 if status != "OK":
                     raise RuntimeError("IMAP-Abruf fehlgeschlagen")
 
@@ -134,8 +135,14 @@ def main():
                     f"{data.get('reservation_id')}"
                 )
             except Exception as exc:
+                failures.append(mail_id.decode())
                 print(f"Fehler bei Mail {mail_id.decode()}: {exc}")
-                # Ungelesen lassen, damit der nächste Lauf erneut versucht.
+                # BODY.PEEK lässt die Mail für den nächsten Lauf ungelesen.
+
+        if failures:
+            raise RuntimeError(
+                f"{len(failures)} Buchungsmail(s) konnten nicht verarbeitet werden"
+            )
     finally:
         try:
             mailbox.logout()
