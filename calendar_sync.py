@@ -1,14 +1,15 @@
 import hashlib
 import os
 import re
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
 
 
-BERLIN = timezone(timedelta(hours=2))
+BERLIN = ZoneInfo("Europe/Berlin")
 GERMAN_MONTHS = {
     "januar": 1,
     "februar": 2,
