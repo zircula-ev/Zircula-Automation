@@ -1,4 +1,14 @@
 import re
+from datetime import datetime
+
+
+def _normalize_date(value):
+    for date_format in ("%d.%m.%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(value, date_format).strftime("%d.%m.%Y")
+        except ValueError:
+            pass
+    raise ValueError(f"Nicht unterstütztes Datumsformat: {value}")
 
 
 def parse_myturn_text(text, subject):
@@ -12,19 +22,31 @@ def parse_myturn_text(text, subject):
         ),
     }
 
-    match = re.search(r"Reservierung\s+#(\d+)", text)
+    match = re.search(r"(?:Reservierung|Reservation)\s+#(\d+)", text, re.IGNORECASE)
     if match:
         result["reservation_id"] = match.group(1)
 
-    match = re.search(r"Datum\s+(\d{2}\.\d{2}\.\d{4})", text)
+    match = re.search(
+        r"(?:Datum|Date)\s+(\d{2}[./]\d{2}[./]\d{4})",
+        text,
+        re.IGNORECASE,
+    )
     if match:
-        result["booking_date"] = match.group(1)
+        result["booking_date"] = _normalize_date(match.group(1))
 
-    match = re.search(r"Fällig\s+(\d{2}\.\d{2}\.\d{4})", text)
+    match = re.search(
+        r"(?:Fällig|Due\s+Back)\s+(\d{2}[./]\d{2}[./]\d{4})",
+        text,
+        re.IGNORECASE,
+    )
     if match:
-        result["return_date"] = match.group(1)
+        result["return_date"] = _normalize_date(match.group(1))
 
-    match = re.search(r"Hinweise\s+(.*?)\s+Artikel", text, re.DOTALL)
+    match = re.search(
+        r"(?:Hinweise|Notes)\s+(.*?)\s+(?:Artikel|Items?)\b",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
     if match:
         result["notes"] = " ".join(match.group(1).split())
 
@@ -33,9 +55,10 @@ def parse_myturn_text(text, subject):
         result["pickup_time"] = match.group(1).replace("–", "-")
 
     match = re.search(
-        r"Artikel\s+Anzahl\s+(.*?)\s+1\s+Gesamtzahl",
+        r"(?:Artikel\s+Anzahl|Item\s+Quantity)\s+"
+        r"(.*?)\s+1\s+(?:Gesamtzahl|Total\s+Items)",
         text,
-        re.DOTALL,
+        re.DOTALL | re.IGNORECASE,
     )
     if match:
         result["item"] = " ".join(match.group(1).split())
