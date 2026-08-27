@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 
 BERLIN = ZoneInfo("Europe/Berlin")
+EVENT_ROLES = ("booking", "pickup", "return", "handover")
 GERMAN_MONTHS = {
     "januar": 1,
     "februar": 2,
@@ -73,19 +74,19 @@ def _german_datetime(value):
     )
 
 
-def event_uid(data):
+def event_uid(data, role="booking"):
     source = data.get("source", "myturn")
     reservation_id = data.get("reservation_id")
     if not reservation_id:
         raise ValueError("Reservierungs-ID fehlt")
 
-    seed = f"{source}:{reservation_id}".encode("utf-8")
+    seed = f"{source}:{reservation_id}:{role}".encode("utf-8")
     digest = hashlib.sha256(seed).hexdigest()
     return f"zircula-booking-{digest}@zircula.org"
 
 
-def event_filename(data):
-    return hashlib.sha256(event_uid(data).encode("utf-8")).hexdigest() + ".ics"
+def event_filename(data, role="booking"):
+    return hashlib.sha256(event_uid(data, role).encode("utf-8")).hexdigest() + ".ics"
 
 
 def _schedule(data):
@@ -105,12 +106,6 @@ def _schedule(data):
         )
         return "timed", start, end
 
-    if resource_type == "cargo_bike":
-        start = _german_datetime(data.get("pickup_time"))
-        end = _german_datetime(data.get("return_time"))
-        if start and end and end > start:
-            return "timed", start, end
-
     pickup = _time_range(data.get("pickup_time"))
     return_date = _date(data.get("return_date") or data["booking_date"])
 
@@ -122,7 +117,7 @@ def _schedule(data):
     return "all_day", booking_date, return_date + timedelta(days=1)
 
 
-def _summary(data):
+def _summary(data, action=None):
     icons = {
         "room": "Raum",
         "tool": "Ausleihe",
@@ -130,12 +125,35 @@ def _summary(data):
     }
     label = icons.get(data.get("resource_type"), "Buchung")
     item = data.get("room") or data.get("item") or "Unbekannt"
+    if action:
+        return f"{action}: {item}"
     return f"{label}: {item}"
 
 
-def build_ics(data):
-    mode, start, end = _schedule(data)
-    uid = event_uid(data)
+def _event_roles(data):
+    if data.get("resource_type") == "room":
+        return (("booking", None, None),)
+
+    booking_date = _date(data["booking_date"])
+    return_date = _date(data.get("return_date") or data["booking_date"])
+    if booking_date == return_date:
+        return (("handover", "Ausgabe & Rückgabe", booking_date),)
+
+    return (
+        ("pickup", "Ausgabe", booking_date),
+        ("return", "Rückgabe", return_date),
+    )
+
+
+def build_ics(data, role="booking", action=None, event_date=None):
+    if event_date is None:
+        mode, start, end = _schedule(data)
+    else:
+        mode = "all_day"
+        start = event_date
+        end = event_date + timedelta(days=1)
+
+    uid = event_uid(data, role)
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     description = [
@@ -153,7 +171,7 @@ def build_ics(data):
         "BEGIN:VEVENT",
         f"UID:{uid}",
         f"DTSTAMP:{now}",
-        f"SUMMARY:{_escape(_summary(data))}",
+        f"SUMMARY:{_escape(_summary(data, action))}",
         f"DESCRIPTION:{_escape(chr(10).join(description))}",
         f"X-ZIRCULA-SOURCE:{_escape(data.get('source', 'myturn'))}",
         f"X-ZIRCULA-RESERVATION-ID:{_escape(data.get('reservation_id'))}",
@@ -179,6 +197,17 @@ def build_ics(data):
 
     lines.extend(["STATUS:CONFIRMED", "END:VEVENT", "END:VCALENDAR", ""])
     return "\r\n".join(lines)
+
+
+def calendar_entries(data):
+    return [
+        (
+            role,
+            event_filename(data, role),
+            build_ics(data, role, action, event_date),
+        )
+        for role, action, event_date in _event_roles(data)
+    ]
 
 
 class CalDAVCalendar:
@@ -218,24 +247,55 @@ class CalDAVCalendar:
             )
 
     def sync(self, data):
-        url = self.calendar_url + quote(event_filename(data))
+        entries = calendar_entries(data)
 
         if data.get("status") == "cancelled":
-            response = self.session.delete(url, timeout=self.timeout)
+            deleted = 0
+            for role in EVENT_ROLES:
+                filename = event_filename(data, role)
+                response = self.session.delete(
+                    self.calendar_url + quote(filename),
+                    timeout=self.timeout,
+                )
+                if response.status_code not in (200, 204, 404):
+                    raise RuntimeError(
+                        "Kalendertermin konnte nicht gelöscht werden: "
+                        f"HTTP {response.status_code}"
+                    )
+                if response.status_code != 404:
+                    deleted += 1
+            return f"deleted:{deleted}"
+
+        created = 0
+        updated = 0
+        active_roles = {role for role, _, _ in entries}
+        for _, filename, payload in entries:
+            response = self.session.put(
+                self.calendar_url + quote(filename),
+                data=payload.encode("utf-8"),
+                headers={"Content-Type": "text/calendar; charset=utf-8"},
+                timeout=self.timeout,
+            )
+            if response.status_code not in (200, 201, 204):
+                raise RuntimeError(
+                    "Kalendertermin konnte nicht gespeichert werden: "
+                    f"HTTP {response.status_code}"
+                )
+            if response.status_code == 201:
+                created += 1
+            else:
+                updated += 1
+
+        for role in EVENT_ROLES:
+            if role in active_roles:
+                continue
+            response = self.session.delete(
+                self.calendar_url + quote(event_filename(data, role)),
+                timeout=self.timeout,
+            )
             if response.status_code not in (200, 204, 404):
                 raise RuntimeError(
-                    f"Kalendertermin konnte nicht gelöscht werden: HTTP {response.status_code}"
+                    "Veralteter Kalendertermin konnte nicht gelöscht werden: "
+                    f"HTTP {response.status_code}"
                 )
-            return "deleted" if response.status_code != 404 else "already_absent"
-
-        response = self.session.put(
-            url,
-            data=build_ics(data).encode("utf-8"),
-            headers={"Content-Type": "text/calendar; charset=utf-8"},
-            timeout=self.timeout,
-        )
-        if response.status_code not in (200, 201, 204):
-            raise RuntimeError(
-                f"Kalendertermin konnte nicht gespeichert werden: HTTP {response.status_code}"
-            )
-        return "created" if response.status_code == 201 else "updated"
+        return f"created:{created},updated:{updated}"
