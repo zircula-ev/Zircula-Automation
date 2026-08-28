@@ -46,6 +46,28 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertIn("DTSTART;VALUE=DATE:20260620", entries[1][2])
         self.assertIn("DTEND;VALUE=DATE:20260621", entries[1][2])
 
+    def test_commonsbooking_preserves_selected_handover_times(self):
+        booking = {
+            "source": "commonsbooking",
+            "status": "confirmed",
+            "reservation_id": "timed-lale-id",
+            "resource_type": "cargo_bike",
+            "item": "Carla Cargo Schwarz",
+            "booking_date": "28.08.2026",
+            "return_date": "29.08.2026",
+            "pickup_time": "28. August 2026 11:00 - 12:00",
+            "return_time": "29. August 2026 15:00 - 16:00",
+        }
+
+        entries = calendar_entries(booking)
+
+        self.assertEqual(len(entries), 2)
+        self.assertIn("DTSTART:20260828T090000Z", entries[0][2])
+        self.assertIn("DTEND:20260828T100000Z", entries[0][2])
+        self.assertIn("DTSTART:20260829T130000Z", entries[1][2])
+        self.assertIn("DTEND:20260829T140000Z", entries[1][2])
+        self.assertNotIn("VALUE=DATE", "".join(entry[2] for entry in entries))
+
     def test_commonsbooking_id_survives_cancellation_subject(self):
         text = """
         Abholung: 19. Juni 2026 0:00 - 23:59

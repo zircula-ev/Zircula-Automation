@@ -117,6 +117,26 @@ def _schedule(data):
     return "all_day", booking_date, return_date + timedelta(days=1)
 
 
+def _event_schedule(event_date, time_value=None):
+    time_range = _time_range(time_value)
+    if not time_range:
+        return "all_day", event_date, event_date + timedelta(days=1)
+
+    start_time, end_time = time_range
+    if (
+        start_time == end_time
+        or (
+            start_time == datetime.strptime("00:00", "%H:%M").time()
+            and end_time == datetime.strptime("23:59", "%H:%M").time()
+        )
+    ):
+        return "all_day", event_date, event_date + timedelta(days=1)
+
+    start = datetime.combine(event_date, start_time, BERLIN)
+    end = datetime.combine(event_date, end_time, BERLIN)
+    return "timed", start, end
+
+
 def _summary(data, action=None):
     icons = {
         "room": "Raum",
@@ -132,26 +152,30 @@ def _summary(data, action=None):
 
 def _event_roles(data):
     if data.get("resource_type") == "room":
-        return (("booking", None, None),)
+        return (("booking", None, None, None),)
 
     booking_date = _date(data["booking_date"])
     return_date = _date(data.get("return_date") or data["booking_date"])
     if booking_date == return_date:
-        return (("handover", "Ausgabe & Rückgabe", booking_date),)
+        return (("handover", "Ausgabe & Rückgabe", booking_date, None),)
 
     return (
-        ("pickup", "Ausgabe", booking_date),
-        ("return", "Rückgabe", return_date),
+        ("pickup", "Ausgabe", booking_date, data.get("pickup_time")),
+        ("return", "Rückgabe", return_date, data.get("return_time")),
     )
 
 
-def build_ics(data, role="booking", action=None, event_date=None):
+def build_ics(
+    data,
+    role="booking",
+    action=None,
+    event_date=None,
+    event_time=None,
+):
     if event_date is None:
         mode, start, end = _schedule(data)
     else:
-        mode = "all_day"
-        start = event_date
-        end = event_date + timedelta(days=1)
+        mode, start, end = _event_schedule(event_date, event_time)
 
     uid = event_uid(data, role)
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -204,9 +228,9 @@ def calendar_entries(data):
         (
             role,
             event_filename(data, role),
-            build_ics(data, role, action, event_date),
+            build_ics(data, role, action, event_date, event_time),
         )
-        for role, action, event_date in _event_roles(data)
+        for role, action, event_date, event_time in _event_roles(data)
     ]
 
 
