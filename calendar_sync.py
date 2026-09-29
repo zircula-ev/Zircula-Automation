@@ -360,15 +360,48 @@ class CalDAVCalendar:
                 _calendar_start_date(calendar_data),
             )
             if key in matches:
-                matches[key].append(urljoin(self.calendar_url, href_node.text))
+                matches[key].append(
+                    (
+                        urljoin(self.calendar_url, href_node.text),
+                        _calendar_property(
+                            calendar_data,
+                            "X-ZIRCULA-RESERVATION-ID",
+                        ),
+                    )
+                )
 
-        ambiguous = [key for key, urls in matches.items() if len(urls) > 1]
+        id_sets = [
+            {reservation_id for _, reservation_id in candidates if reservation_id}
+            for candidates in matches.values()
+            if candidates
+        ]
+        common_ids = set.intersection(*id_sets) if id_sets else set()
+        if len(common_ids) == 1:
+            reservation_id = next(iter(common_ids))
+            matches = {
+                key: [
+                    candidate
+                    for candidate in candidates
+                    if candidate[1] == reservation_id
+                ]
+                for key, candidates in matches.items()
+            }
+
+        ambiguous = [
+            key
+            for key, candidates in matches.items()
+            if len(candidates) > 1
+        ]
         if ambiguous:
             raise RuntimeError(
                 "Stornierung ist nicht eindeutig; mehrere passende "
                 "Kalendertermine gefunden"
             )
-        return [urls[0] for urls in matches.values() if urls]
+        return [
+            candidates[0][0]
+            for candidates in matches.values()
+            if candidates
+        ]
 
     def sync(self, data):
         if data.get("status") == "cancelled":
