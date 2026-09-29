@@ -1,9 +1,10 @@
 import hashlib
 import os
 import re
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import requests
 from dotenv import load_dotenv
@@ -234,6 +235,30 @@ def calendar_entries(data):
     ]
 
 
+def _calendar_start_date(calendar_data):
+    match = re.search(
+        r"(?:^|\r?\n)DTSTART(?:;[^:]*)?:(\d{8})(?:T(\d{6})Z)?(?:\r?\n|$)",
+        calendar_data,
+    )
+    if not match:
+        return None
+    if not match.group(2):
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    value = datetime.strptime(
+        match.group(1) + match.group(2),
+        "%Y%m%d%H%M%S",
+    ).replace(tzinfo=timezone.utc)
+    return value.astimezone(BERLIN).date()
+
+
+def _calendar_property(calendar_data, name):
+    match = re.search(
+        rf"(?:^|\r?\n){re.escape(name)}(?:;[^:]*)?:(.*?)(?:\r?\n|$)",
+        calendar_data,
+    )
+    return match.group(1) if match else None
+
+
 class CalDAVCalendar:
     def __init__(self, calendar_url, username, password, timeout=30):
         self.calendar_url = calendar_url.rstrip("/") + "/"
@@ -270,9 +295,82 @@ class CalDAVCalendar:
                 f"CalDAV-Kalender nicht erreichbar: HTTP {response.status_code}"
             )
 
-    def sync(self, data):
-        entries = calendar_entries(data)
+    def _commonsbooking_cancellation_urls(self, data):
+        item = data.get("item")
+        booking_date = _date(data["booking_date"])
+        return_date = _date(data.get("return_date") or data["booking_date"])
+        if booking_date == return_date:
+            expected = {
+                (_escape(f"Ausgabe & Rückgabe: {item}"), booking_date),
+            }
+        else:
+            expected = {
+                (_escape(f"Ausgabe: {item}"), booking_date),
+                (_escape(f"Rückgabe: {item}"), return_date),
+            }
 
+        start = datetime.combine(
+            booking_date - timedelta(days=1),
+            datetime.min.time(),
+            timezone.utc,
+        ).strftime("%Y%m%dT%H%M%SZ")
+        end = datetime.combine(
+            return_date + timedelta(days=2),
+            datetime.min.time(),
+            timezone.utc,
+        ).strftime("%Y%m%dT%H%M%SZ")
+        query = f"""<?xml version="1.0" encoding="UTF-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><d:getetag/><c:calendar-data/></d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:time-range start="{start}" end="{end}"/>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>"""
+        response = self.session.request(
+            "REPORT",
+            self.calendar_url,
+            data=query.encode("utf-8"),
+            headers={"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+            timeout=self.timeout,
+        )
+        if response.status_code != 207:
+            raise RuntimeError(
+                "Kalender konnte nicht nach der stornierten Buchung durchsucht "
+                f"werden: HTTP {response.status_code}"
+            )
+
+        matches = {entry: [] for entry in expected}
+        root = ET.fromstring(response.content)
+        for item_response in root.findall("{DAV:}response"):
+            href_node = item_response.find("{DAV:}href")
+            calendar_node = item_response.find(
+                ".//{urn:ietf:params:xml:ns:caldav}calendar-data"
+            )
+            if href_node is None or calendar_node is None or not calendar_node.text:
+                continue
+            calendar_data = calendar_node.text
+            if _calendar_property(calendar_data, "X-ZIRCULA-SOURCE") != "commonsbooking":
+                continue
+            key = (
+                _calendar_property(calendar_data, "SUMMARY"),
+                _calendar_start_date(calendar_data),
+            )
+            if key in matches:
+                matches[key].append(urljoin(self.calendar_url, href_node.text))
+
+        ambiguous = [key for key, urls in matches.items() if len(urls) > 1]
+        if ambiguous:
+            raise RuntimeError(
+                "Stornierung ist nicht eindeutig; mehrere passende "
+                "Kalendertermine gefunden"
+            )
+        return [urls[0] for urls in matches.values() if urls]
+
+    def sync(self, data):
         if data.get("status") == "cancelled":
             deleted = 0
             for role in EVENT_ROLES:
@@ -288,7 +386,19 @@ class CalDAVCalendar:
                     )
                 if response.status_code != 404:
                     deleted += 1
+            if deleted == 0 and data.get("source") == "commonsbooking":
+                for url in self._commonsbooking_cancellation_urls(data):
+                    response = self.session.delete(url, timeout=self.timeout)
+                    if response.status_code not in (200, 204, 404):
+                        raise RuntimeError(
+                            "Gefundener Kalendertermin konnte nicht gelöscht "
+                            f"werden: HTTP {response.status_code}"
+                        )
+                    if response.status_code != 404:
+                        deleted += 1
             return f"deleted:{deleted}"
+
+        entries = calendar_entries(data)
 
         created = 0
         updated = 0

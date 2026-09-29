@@ -1,6 +1,14 @@
 import unittest
+from html import escape
+from unittest.mock import Mock
 
-from calendar_sync import build_ics, calendar_entries, event_filename, event_uid
+from calendar_sync import (
+    CalDAVCalendar,
+    build_ics,
+    calendar_entries,
+    event_filename,
+    event_uid,
+)
 from parser_lastenrad import parse_lastenrad
 
 
@@ -125,6 +133,61 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0][0], "handover")
         self.assertIn("SUMMARY:Ausgabe & Rückgabe: Beamer", entries[0][2])
+
+    def test_cancellation_finds_legacy_events_by_item_and_dates(self):
+        original = {
+            "source": "commonsbooking",
+            "status": "confirmed",
+            "reservation_id": "legacy-time-based-id",
+            "resource_type": "cargo_bike",
+            "item": "Laszlo",
+            "booking_date": "23.09.2026",
+            "return_date": "27.09.2026",
+            "pickup_time": "23. September 2026 11:00 - 12:00",
+            "return_time": "27. September 2026 15:00 - 16:00",
+        }
+        entries = calendar_entries(original)
+        responses = []
+        for _, filename, calendar_data in entries:
+            responses.append(
+                "<d:response>"
+                f"<d:href>/calendars/test/{filename}</d:href>"
+                "<d:propstat><d:prop>"
+                f"<c:calendar-data>{escape(calendar_data)}</c:calendar-data>"
+                "</d:prop></d:propstat>"
+                "</d:response>"
+            )
+        report = Mock(
+            status_code=207,
+            content=(
+                '<d:multistatus xmlns:d="DAV:" '
+                'xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                + "".join(responses)
+                + "</d:multistatus>"
+            ).encode("utf-8"),
+        )
+        not_found = Mock(status_code=404)
+        deleted = Mock(status_code=204)
+        calendar = CalDAVCalendar(
+            "https://cloud.example.test/calendars/test/",
+            "user",
+            "password",
+        )
+        calendar.session.request = Mock(return_value=report)
+        calendar.session.delete = Mock(
+            side_effect=[not_found, not_found, not_found, not_found, deleted, deleted]
+        )
+        cancellation = parse_lastenrad(
+            "Deine Buchung wurde storniert.",
+            "Buchung storniert: Laszlo am Standort WERK. "
+            "von 23. September 2026 bis 27. September 2026",
+        )
+
+        result = calendar.sync(cancellation)
+
+        self.assertEqual(result, "deleted:2")
+        calendar.session.request.assert_called_once()
+        self.assertEqual(calendar.session.delete.call_count, 6)
 
 
 if __name__ == "__main__":
