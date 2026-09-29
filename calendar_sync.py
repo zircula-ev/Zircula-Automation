@@ -376,13 +376,14 @@ class CalDAVCalendar:
             if candidates
         ]
         common_ids = set.intersection(*id_sets) if id_sets else set()
+        matched_reservation_id = None
         if len(common_ids) == 1:
-            reservation_id = next(iter(common_ids))
+            matched_reservation_id = next(iter(common_ids))
             matches = {
                 key: [
                     candidate
                     for candidate in candidates
-                    if candidate[1] == reservation_id
+                    if candidate[1] == matched_reservation_id
                 ]
                 for key, candidates in matches.items()
             }
@@ -392,16 +393,18 @@ class CalDAVCalendar:
             for key, candidates in matches.items()
             if len(candidates) > 1
         ]
-        if ambiguous:
+        if ambiguous and matched_reservation_id is None:
             raise RuntimeError(
                 "Stornierung ist nicht eindeutig; mehrere passende "
                 "Kalendertermine gefunden"
             )
-        return [
-            candidates[0][0]
-            for candidates in matches.values()
-            if candidates
-        ]
+        return list(
+            dict.fromkeys(
+                url
+                for candidates in matches.values()
+                for url, _ in candidates
+            )
+        )
 
     def sync(self, data):
         if data.get("status") == "cancelled":
