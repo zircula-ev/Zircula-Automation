@@ -189,6 +189,77 @@ class CalendarSyncTest(unittest.TestCase):
         calendar.session.request.assert_called_once()
         self.assertEqual(calendar.session.delete.call_count, 6)
 
+    def test_cancellation_uses_booking_id_for_overlapping_returns(self):
+        first = {
+            "source": "commonsbooking",
+            "status": "confirmed",
+            "reservation_id": "first-booking",
+            "resource_type": "cargo_bike",
+            "item": "Laszlo",
+            "booking_date": "23.09.2026",
+            "return_date": "27.09.2026",
+        }
+        second = {
+            "source": "commonsbooking",
+            "status": "confirmed",
+            "reservation_id": "second-booking",
+            "resource_type": "cargo_bike",
+            "item": "Laszlo",
+            "booking_date": "26.09.2026",
+            "return_date": "27.09.2026",
+        }
+        responses = []
+        filenames = {}
+        for booking in (first, second):
+            filenames[booking["reservation_id"]] = {}
+            for role, filename, calendar_data in calendar_entries(booking):
+                filenames[booking["reservation_id"]][role] = filename
+                responses.append(
+                    "<d:response>"
+                    f"<d:href>/calendars/test/{filename}</d:href>"
+                    "<d:propstat><d:prop>"
+                    f"<c:calendar-data>{escape(calendar_data)}</c:calendar-data>"
+                    "</d:prop></d:propstat>"
+                    "</d:response>"
+                )
+        report = Mock(
+            status_code=207,
+            content=(
+                '<d:multistatus xmlns:d="DAV:" '
+                'xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                + "".join(responses)
+                + "</d:multistatus>"
+            ).encode("utf-8"),
+        )
+        calendar = CalDAVCalendar(
+            "https://cloud.example.test/calendars/test/",
+            "user",
+            "password",
+        )
+        calendar.session.request = Mock(return_value=report)
+        cancellation = parse_lastenrad(
+            "Deine Buchung wurde storniert.",
+            "Buchung storniert: Laszlo am Standort WERK. "
+            "von 23. September 2026 bis 27. September 2026",
+        )
+
+        urls = calendar._commonsbooking_cancellation_urls(cancellation)
+
+        self.assertEqual(len(urls), 2)
+        self.assertTrue(
+            urls[0].endswith(filenames["first-booking"]["pickup"])
+        )
+        self.assertTrue(
+            urls[1].endswith(filenames["first-booking"]["return"])
+        )
+        self.assertFalse(
+            any(
+                filename in url
+                for filename in filenames["second-booking"].values()
+                for url in urls
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
