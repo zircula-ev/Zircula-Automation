@@ -43,7 +43,11 @@ def parse_lastenrad(text, subject):
         "raw_subject": subject,
     }
 
-    match = re.search(r"Buchung von (.+?) am Standort", subject)
+    match = re.search(
+        r"(?:Buchung storniert:|Buchung von)\s*(.+?)\s+am Standort",
+        subject,
+        re.IGNORECASE,
+    )
     if match:
         result["item"] = match.group(1).strip()
 
@@ -61,17 +65,41 @@ def parse_lastenrad(text, subject):
         if return_date:
             result["return_date"] = return_date
 
+    if not result.get("booking_date"):
+        date_match = re.search(
+            r"(?:\bam\s+|\bvon\s+)"
+            r"(\d{1,2}\.\s+[A-Za-zäöüÄÖÜ]+\s+\d{4})"
+            r"(?:\s+bis\s+"
+            r"(\d{1,2}\.\s+[A-Za-zäöüÄÖÜ]+\s+\d{4}))?",
+            subject,
+            re.IGNORECASE,
+        )
+        if date_match:
+            result["booking_date"] = _german_date(date_match.group(1))
+            result["return_date"] = _german_date(
+                date_match.group(2) or date_match.group(1)
+            )
+
     match = re.search(r"Standort\s*(.+?)(?:\n\s*\n|$)", text, re.DOTALL)
     if match:
         result["location"] = " ".join(match.group(1).split())
 
-    identity = "|".join(
-        [
+    identity_parts = [
+        result.get("item", ""),
+        result.get("pickup_time", ""),
+        result.get("return_time", ""),
+    ]
+    if not any(identity_parts[1:]):
+        identity_parts = [
             result.get("item", ""),
-            result.get("pickup_time", ""),
-            result.get("return_time", ""),
+            result.get("booking_date", ""),
+            result.get("return_date", ""),
         ]
-    )
+    if not all(identity_parts):
+        raise ValueError(
+            "CommonsBooking-Mail enthält keine eindeutigen Buchungsdaten"
+        )
+    identity = "|".join(identity_parts)
     result["reservation_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     return result
