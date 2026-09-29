@@ -222,6 +222,23 @@ class CalendarSyncTest(unittest.TestCase):
                     "</d:prop></d:propstat>"
                     "</d:response>"
                 )
+        duplicate_return = filenames["first-booking"]["return"].replace(
+            ".ics",
+            "-duplicate.ics",
+        )
+        first_return = next(
+            calendar_data
+            for role, _, calendar_data in calendar_entries(first)
+            if role == "return"
+        )
+        responses.append(
+            "<d:response>"
+            f"<d:href>/calendars/test/{duplicate_return}</d:href>"
+            "<d:propstat><d:prop>"
+            f"<c:calendar-data>{escape(first_return)}</c:calendar-data>"
+            "</d:prop></d:propstat>"
+            "</d:response>"
+        )
         report = Mock(
             status_code=207,
             content=(
@@ -245,13 +262,14 @@ class CalendarSyncTest(unittest.TestCase):
 
         urls = calendar._commonsbooking_cancellation_urls(cancellation)
 
-        self.assertEqual(len(urls), 2)
+        self.assertEqual(len(urls), 3)
         self.assertTrue(
             urls[0].endswith(filenames["first-booking"]["pickup"])
         )
         self.assertTrue(
             urls[1].endswith(filenames["first-booking"]["return"])
         )
+        self.assertTrue(any(url.endswith(duplicate_return) for url in urls))
         self.assertFalse(
             any(
                 filename in url
